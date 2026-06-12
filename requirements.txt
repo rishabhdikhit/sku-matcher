@@ -1,0 +1,6 @@
+opencv-python
+pandas
+openpyxl
+pyzbar
+# Optional, only if you need to read SKUs as plain text (large download):
+# easyocr

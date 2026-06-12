@@ -1,0 +1,13 @@
+# transient run logs
+run_out.txt
+run_err.txt
+
+# generated demo data
+skus.xlsx
+
+# python
+__pycache__/
+*.pyc
+
+# your real product data lives outside this folder (Downloads) — never commit it
+*.csv
