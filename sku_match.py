@@ -1,47 +1,35 @@
 """
-Live SKU -> Sheet matcher  (OCR-heavy build)
+Live SKU -> Sheet scanner  (OCR-heavy, threaded)
 
-Hold a SKU inside the on-screen box. The banner shows
-SHEET 1 / SHEET 2 / NOT FOUND in real time. Nothing is saved.
+Hold a SKU to the camera; the window shows which sheet(s) it belongs to,
+live. Sheets are configured in the dashboard (dashboard.py) and read from
+sheets.json — this scanner supports any number of sheets.
 
-Primary reader : easyocr (reads plain printed text)
-Bonus reader   : OpenCV QR + barcode (free, no extra install)
-
-Run:  python sku_match.py
+Run:  python sku_match.py                 (built-in webcam)
+      python sku_match.py --source 1       (other local cam)
+      python sku_match.py --source http://PHONE_IP:8080/video   (phone)
 Quit: press q  (or close the window)
-
-SKU list comes from skus.xlsx in this folder, two tabs.
-First tab -> "Sheet 1", second tab -> "Sheet 2".
-If a tab has a column headed SKU it is used, else the first column.
 """
 
 import os
 import sys
 import time
-import difflib
 import threading
 
 import cv2
-import pandas as pd
 
-HERE = os.path.dirname(os.path.abspath(__file__))
+import sheetstore as ss
+from sheetstore import norm, match_sku
 
-# Your data. Each entry: (csv_path, label). First file -> "Sheet 1", etc.
-SHEETS = [
-    (r"C:\Users\Lenovo\Downloads\01.csv", "Sheet 1"),
-    (r"C:\Users\Lenovo\Downloads\02.csv", "Sheet 2"),
-]
-SKU_COL = 1   # 0-based column index holding the SKU code in those CSVs
-SKIP_VALUES = {"SIZE", "TOTAL", "COUNT", ""}
+# Per-sheet colors (BGR). Assigned in config order; extra sheets reuse the palette.
+PALETTE = [(0, 200, 0), (230, 130, 0), (0, 170, 255), (200, 0, 200),
+           (180, 180, 0), (120, 90, 230)]
+MULTI_COLOR = (240, 240, 240)     # SKU in more than one sheet
+AMBIG_COLOR = (0, 215, 255)
+NOTFOUND_COLOR = (0, 0, 230)
+IDLE_COLOR = (200, 200, 200)
 
-# How close an OCR read must be to a real SKU to count as a match.
-# 1.0 = exact only. 0.85 tolerates ~1 wrong char in a short code.
-FUZZY_CUTOFF = 0.85
-
-# Restrict OCR to the characters SKUs actually use -> faster + more accurate.
 ALLOWLIST = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-"
-
-# OCR is slow on big images; cap the scan region's width before recognition.
 OCR_MAX_W = 800
 
 # ---- OpenCV native detectors (no extra DLLs) ----
@@ -69,119 +57,18 @@ def get_ocr():
     return _OCR or None
 
 
-def norm(s):
-    return "".join(str(s).split()).upper()
-
-
-# Fold characters that webcam OCR routinely confuses, so O/0, I/1, S/5 etc.
-# all collapse to one canonical form for matching.
-_CONFUSE = str.maketrans({
-    "O": "0",
-    "I": "1", "L": "1",
-    "S": "5",
-    "B": "8",
-    "Z": "2",
-    "G": "6",
-    "-": "", "_": "", ".": "", "/": "", " ": "",
-})
-def canon(s):
-    return norm(s).translate(_CONFUSE)
-
-
-_CANON_INDEX = None
-def build_canon_index(lookup):
-    """canon form -> set of original keys that fold to it."""
-    idx = {}
-    for k in lookup:
-        idx.setdefault(canon(k), set()).add(k)
-    return idx
-
-
-def sheets_to_label(sheets):
-    """A set of sheet labels -> one display label."""
-    s = sorted(sheets)
-    if len(s) == 1:
-        return s[0]                       # "Sheet 1" or "Sheet 2"
-    return "Both " + " & ".join(x.replace("Sheet ", "") for x in s)  # "Both 1 & 2"
-
-
-def load_sheets(_=None):
-    """Read the CSVs in SHEETS. Return dict: normalized SKU -> set(sheet labels)."""
-    lookup = {}
-    counts = {}
-    for path, label in SHEETS:
-        if not os.path.exists(path):
-            print(f"\n  ERROR: {path} not found.\n")
-            sys.exit(1)
-        df = pd.read_csv(path, header=None, dtype=str, keep_default_na=False)
-        if SKU_COL >= df.shape[1]:
-            print(f"\n  ERROR: {path} has no column index {SKU_COL}.\n")
-            sys.exit(1)
-        n = 0
-        for raw in df[SKU_COL]:
-            key = norm(raw)
-            if key and key not in SKIP_VALUES:
-                lookup.setdefault(key, set()).add(label)
-                n += 1
-        counts[label] = n
-    both = sum(1 for v in lookup.values() if len(v) > 1)
-    print(f"  Loaded {len(lookup)} unique SKUs  ("
-          + ", ".join(f"{lbl}: {c}" for lbl, c in counts.items())
-          + f", in both: {both})")
-    return lookup
-
-
-def _resolve(hits, lookup):
-    """hits = set of real SKU keys that a read maps to. Return (label, key)."""
-    if len(hits) == 1:
-        k = next(iter(hits))
-        return sheets_to_label(lookup[k]), k
-    # several real SKUs. If they all carry the same sheet membership, it's safe.
-    memberships = {frozenset(lookup[k]) for k in hits}
-    if len(memberships) == 1:
-        k = sorted(hits)[0]
-        return sheets_to_label(lookup[k]), k
-    return "AMBIGUOUS", "/".join(sorted(hits))
-
-
-def match_sku(text, lookup):
-    """Return (label, matched_key) for an OCR/scan string.
-    label is 'Sheet 1'/'Sheet 2'/'Both 1 & 2', 'AMBIGUOUS', or (None, None)."""
-    global _CANON_INDEX
-    if _CANON_INDEX is None:
-        _CANON_INDEX = build_canon_index(lookup)
-    key = norm(text)
-    if not key:
-        return None, None
-    # 1) exact
-    if key in lookup:
-        return sheets_to_label(lookup[key]), key
-    if len(key) < 3:
-        return None, None
-    # 2) confusable-folded exact
-    ckey = canon(key)
-    hits = _CANON_INDEX.get(ckey)
-    if hits:
-        return _resolve(hits, lookup)
-    # 3) fuzzy on folded forms (tolerate ~1 slip)
-    close = difflib.get_close_matches(ckey, _CANON_INDEX.keys(), n=1, cutoff=FUZZY_CUTOFF)
-    if close:
-        return _resolve(_CANON_INDEX[close[0]], lookup)
-    return None, None
-
-
 def scan_codes(frame):
     """OpenCV QR + barcode. Returns list of decoded strings."""
     out = []
     try:
-        data, pts, _ = _qr.detectAndDecode(frame)
+        data, _pts, _ = _qr.detectAndDecode(frame)
         if data:
             out.append(data)
     except Exception:
         pass
     if HAVE_BARCODE:
         try:
-            ok, infos, _types, _pts = _bar.detectAndDecodeMulti(frame)
+            ok, infos, _t, _p = _bar.detectAndDecodeMulti(frame)
             if ok and infos:
                 out.extend([s for s in infos if s])
         except Exception:
@@ -190,43 +77,42 @@ def scan_codes(frame):
 
 
 def open_source(source):
-    """source: int-like string -> local webcam index; anything else -> URL/path."""
     if str(source).isdigit():
-        cap = cv2.VideoCapture(int(source), cv2.CAP_DSHOW)  # local cam (DSHOW = fast)
-        what = f"webcam index {source}"
-    else:
-        cap = cv2.VideoCapture(str(source))                 # phone MJPEG/RTSP/HTTP URL
-        what = source
-    return cap, what
+        cap = cv2.VideoCapture(int(source), cv2.CAP_DSHOW)
+        return cap, f"webcam index {source}"
+    cap = cv2.VideoCapture(str(source))
+    return cap, str(source)
 
 
 def roi_box(w, h):
-    """Center scan box coordinates."""
     return int(w * 0.15), int(h * 0.30), int(w * 0.85), int(h * 0.70)
 
 
-def result_banner(label, hit, candidates):
-    """Map a match result to (banner_text, BGR_color)."""
+def result_banner(label, hit, candidates, colors):
     shown = hit or norm(candidates[0])
-    if label == "Sheet 1":
-        return f"SHEET 1   [{shown}]", (0, 200, 0)
-    if label == "Sheet 2":
-        return f"SHEET 2   [{shown}]", (230, 130, 0)
-    if label and label.startswith("Both"):
-        return f"BOTH 1 & 2   [{shown}]", (230, 230, 230)
+    if not label:
+        return f"NOT FOUND  [{norm(candidates[0])}]", NOTFOUND_COLOR
     if label == "AMBIGUOUS":
-        return f"AMBIGUOUS  [{shown}]", (0, 215, 255)
-    if label:
-        return f"{label}   [{shown}]", (0, 200, 0)
-    return f"NOT FOUND  [{norm(candidates[0])}]", (0, 0, 230)
+        return f"AMBIGUOUS  [{shown}]", AMBIG_COLOR
+    color = colors.get(label, MULTI_COLOR)   # multi-sheet labels aren't in the map
+    return f"{label.upper()}   [{shown}]", color
 
 
 def main(source="0"):
-    print("\nSKU -> Sheet matcher  (OCR-heavy, threaded)\n"
-          "-------------------------------------------")
-    lookup = load_sheets()
-    reader = get_ocr()  # warm the model before threads start
+    print("\nSKU -> Sheet scanner  (threaded)\n--------------------------------")
+    cfg = ss.ensure_config()
+    if not cfg:
+        print("  No sheets configured yet.")
+        print("  Start the dashboard (python dashboard.py) and add CSV sheets first.\n")
+        sys.exit(1)
+    lookup, counts = ss.build_lookup(cfg)
+    canon_index = ss.build_canon_index(lookup)
+    colors = {s["label"]: PALETTE[i % len(PALETTE)] for i, s in enumerate(cfg)}
+    both = sum(1 for v in lookup.values() if len(v) > 1)
+    print(f"  {len(lookup)} unique SKUs across {len(cfg)} sheets "
+          f"({', '.join(f'{k}:{v}' for k, v in counts.items())}; in >1 sheet: {both})")
 
+    reader = get_ocr()
     cap, what = open_source(source)
     print(f"  Opening {what} ... (press q to quit)\n")
     if not cap.isOpened():
@@ -235,17 +121,16 @@ def main(source="0"):
         print("  - phone: check the URL and that phone+laptop are on the SAME WiFi\n")
         sys.exit(1)
     try:
-        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # don't queue stale frames
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
     except Exception:
         pass
 
     state = {"frame": None,
-             "result": ("Show a SKU in the box", (200, 200, 200), 0.0),
+             "result": ("Show a SKU in the box", IDLE_COLOR, 0.0),
              "running": True}
     lock = threading.Lock()
 
     def capture_loop():
-        # Always keep only the freshest frame -> no latency build-up.
         while state["running"]:
             ok, f = cap.read()
             if not ok:
@@ -255,7 +140,6 @@ def main(source="0"):
                 state["frame"] = f
 
     def ocr_loop():
-        # Heavy work lives here, off the display thread.
         while state["running"]:
             with lock:
                 f = state["frame"]
@@ -267,12 +151,12 @@ def main(source="0"):
             bx0, by0, bx1, by1 = roi_box(w, h)
             roi = f[by0:by1, bx0:bx1]
 
-            candidates = scan_codes(roi)                  # QR/barcode (cheap)
+            candidates = scan_codes(roi)
             if not candidates and reader is not None:
                 ocr_img = roi
-                if roi.shape[1] > OCR_MAX_W:              # shrink for speed
-                    s = OCR_MAX_W / roi.shape[1]
-                    ocr_img = cv2.resize(roi, None, fx=s, fy=s)
+                if roi.shape[1] > OCR_MAX_W:
+                    sc = OCR_MAX_W / roi.shape[1]
+                    ocr_img = cv2.resize(roi, None, fx=sc, fy=sc)
                 try:
                     for (_b, txt, conf) in reader.readtext(ocr_img, allowlist=ALLOWLIST):
                         if conf > 0.35:
@@ -283,10 +167,10 @@ def main(source="0"):
             if candidates:
                 label, hit = None, None
                 for c in candidates:
-                    label, hit = match_sku(c, lookup)
+                    label, hit = match_sku(c, lookup, canon_index)
                     if label:
                         break
-                text, color = result_banner(label, hit, candidates)
+                text, color = result_banner(label, hit, candidates, colors)
                 with lock:
                     state["result"] = (text, color, time.time())
             else:
@@ -296,7 +180,7 @@ def main(source="0"):
     threading.Thread(target=ocr_loop, daemon=True).start()
 
     win = "SKU -> Sheet"
-    cv2.namedWindow(win, cv2.WINDOW_NORMAL)  # resizable; image scales to fit
+    cv2.namedWindow(win, cv2.WINDOW_NORMAL)
     sized = False
     while True:
         with lock:
@@ -310,13 +194,12 @@ def main(source="0"):
 
         h, w = frame.shape[:2]
         if not sized:
-            # fit the window inside ~960x600 on first frame, keep aspect
             scale = min(960.0 / w, 600.0 / h, 1.0)
             cv2.resizeWindow(win, max(int(w * scale), 320), max(int(h * scale), 240))
             sized = True
         bx0, by0, bx1, by1 = roi_box(w, h)
         if seen and time.time() - seen > 1.3:
-            text, color = "Show a SKU in the box", (200, 200, 200)
+            text, color = "Show a SKU in the box", IDLE_COLOR
 
         cv2.rectangle(frame, (bx0, by0), (bx1, by1), (90, 90, 90), 2)
         cv2.rectangle(frame, (0, 0), (w, 70), (0, 0, 0), -1)

@@ -1,13 +1,20 @@
 # transient run logs
 run_out.txt
 run_err.txt
+dash_err.txt
 
-# generated demo data
+# local config + uploaded data (machine-specific, may contain real SKUs / phone IP)
+sheets.json
+settings.json
+data/
 skus.xlsx
+
+# preview/screenshots
+*.png
 
 # python
 __pycache__/
 *.pyc
 
-# your real product data lives outside this folder (Downloads) — never commit it
+# never commit raw product data
 *.csv

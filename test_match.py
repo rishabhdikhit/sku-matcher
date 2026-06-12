@@ -1,15 +1,26 @@
-import sku_match as m
+"""Offline check of the data layer + matcher (no camera)."""
+import sheetstore as ss
 
-lookup = m.load_sheets()
-tests = [
-    "4MSS2961-03-L",   # only Sheet 1
-    "4MST3206-03-S",   # only Sheet 2
-    "BP0026-04",       # both
-    "4MSR5251-03-32",  # both
-    "4MSS296I-03-L",   # Sheet 1 with OCR slip (I instead of 1)
-    "bp 0025-01",      # both, lowercase + space
-    "NOPE-999",        # not found
-]
-for t in tests:
-    label, hit = m.match_sku(t, lookup)
-    print(f"  {t!r:18} -> {str(label):12} (matched {hit})")
+cfg = ss.ensure_config()
+lookup, counts = ss.build_lookup(cfg)
+ci = ss.build_canon_index(lookup)
+both = sum(1 for v in lookup.values() if len(v) > 1)
+print(f"Sheets: {[s['label'] for s in cfg]}")
+print(f"Unique SKUs: {len(lookup)}  | counts: {counts}  | in >1 sheet: {both}")
+
+# Build live test cases from the real data so we never hardcode SKUs.
+single = next((k for k, v in lookup.items() if len(v) == 1), None)
+multi = next((k for k, v in lookup.items() if len(v) > 1), None)
+
+def show(name, sku):
+    if sku is None:
+        print(f"  {name}: (none in data)"); return
+    label, hit = ss.match_sku(sku, lookup, ci)
+    print(f"  {name}: {sku!r} -> {label}  (matched {hit})")
+
+show("single-sheet", single)
+show("multi-sheet ", multi)
+# OCR-style slip: swap a 0 for letter O in the single-sheet SKU
+if single and "0" in single:
+    show("with O/0 slip", single.replace("0", "O", 1))
+show("not found   ", "ZZ-NOPE-999")
