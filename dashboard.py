@@ -109,6 +109,26 @@ PAGE = """
 </div>
 
 <div class="card">
+  <b>Scan history</b> <span class="mut">{{ hist_total }} scans · {{ hist_distinct }} distinct</span>
+  <div style="margin:10px 0">
+    <a href="{{ url_for('history_csv') }}"><button class="ghost" type="button">Download CSV</button></a>
+    <form method="post" action="{{ url_for('history_clear') }}" style="display:inline"
+          onsubmit="return confirm('Clear all scan history?')">
+      <button class="danger">Clear</button></form>
+  </div>
+  <table>
+    <tr><th>Time</th><th>SKU</th><th>Sheet</th><th>Source</th></tr>
+    {% for r in history %}
+    <tr><td class="mut">{{ r.time }}</td><td>{{ r.sku }}</td>
+        <td><span class="pill">{{ r.sheet }}</span></td><td class="mut">{{ r.source }}</td></tr>
+    {% else %}
+    <tr><td colspan="4" class="mut">No scans yet — start the scanner and hold a SKU up.</td></tr>
+    {% endfor %}
+  </table>
+  {% if hist_total > 50 %}<div class="mut" style="margin-top:6px">Showing latest 50 · download for all.</div>{% endif %}
+</div>
+
+<div class="card">
   <b>Test a SKU</b>
   <form method="post" action="{{ url_for('test') }}">
     <div class="row">
@@ -155,9 +175,13 @@ def index():
     cfg = ss.load_config()
     lookup, counts = ss.build_lookup(cfg)
     overlap = sum(1 for v in lookup.values() if len(v) > 1)
+    hist = ss.read_history()
     return render_template_string(PAGE, sheets=cfg, counts=counts,
                                   total=len(lookup), overlap=overlap,
                                   ip=lan_ip(), phone=ss.get_setting("phone"),
+                                  history=list(reversed(hist))[:50],
+                                  hist_total=len(hist),
+                                  hist_distinct=len({r["sku"] for r in hist}),
                                   result=request.args.get("result"))
 
 
@@ -204,6 +228,20 @@ def test():
     else:
         msg = f"'{sku}' → NOT FOUND in any sheet"
     return redirect(url_for("index", result=msg))
+
+
+@app.route("/history.csv")
+def history_csv():
+    if os.path.exists(ss.HISTORY_FILE):
+        return send_from_directory(ss.HERE, "history.csv", as_attachment=True,
+                                   download_name="scan_history.csv")
+    return redirect(url_for("index", result="No scan history yet."))
+
+
+@app.route("/history/clear", methods=["POST"])
+def history_clear():
+    ss.clear_history()
+    return redirect(url_for("index", result="Scan history cleared."))
 
 
 @app.route("/launch", methods=["POST"])

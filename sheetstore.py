@@ -13,11 +13,16 @@ import csv
 import json
 import shutil
 import difflib
+import datetime
+import threading
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CONFIG_FILE = os.path.join(HERE, "sheets.json")
 SETTINGS_FILE = os.path.join(HERE, "settings.json")
+HISTORY_FILE = os.path.join(HERE, "history.csv")
 DATA_DIR = os.path.join(HERE, "data")
+HISTORY_HEADER = ["time", "sku", "sheet", "source"]
+_hist_lock = threading.Lock()
 
 FUZZY_CUTOFF = 0.85                       # 1.0 = exact only; 0.85 tolerates ~1 slip
 SKIP_VALUES = {"SIZE", "TOTAL", "COUNT", ""}
@@ -84,6 +89,37 @@ def set_setting(key, value):
     s[key] = value
     with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
         json.dump(s, f, indent=2)
+
+
+# ---------- scan history ----------
+def append_scan(sku, sheet, source=""):
+    new = not os.path.exists(HISTORY_FILE)
+    ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with _hist_lock:
+        with open(HISTORY_FILE, "a", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            if new:
+                w.writerow(HISTORY_HEADER)
+            w.writerow([ts, sku, sheet, source])
+
+
+def read_history():
+    rows = []
+    if not os.path.exists(HISTORY_FILE):
+        return rows
+    with _hist_lock:
+        with open(HISTORY_FILE, newline="", encoding="utf-8") as f:
+            for row in csv.DictReader(f):
+                rows.append(row)
+    return rows
+
+
+def clear_history():
+    with _hist_lock:
+        try:
+            os.remove(HISTORY_FILE)
+        except OSError:
+            pass
 
 
 def ensure_config():

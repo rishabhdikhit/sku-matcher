@@ -31,6 +31,7 @@ IDLE_COLOR = (200, 200, 200)
 
 ALLOWLIST = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-"
 OCR_MAX_W = 800
+LOG_COOLDOWN = 3.0   # seconds; don't re-log the same SKU held in frame
 
 # ---- OpenCV native detectors (no extra DLLs) ----
 _qr = cv2.QRCodeDetector()
@@ -129,6 +130,7 @@ def main(source="0"):
              "result": ("Show a SKU in the box", IDLE_COLOR, 0.0),
              "running": True}
     lock = threading.Lock()
+    last_log = {}   # sku -> last time we wrote it to history
 
     def capture_loop():
         while state["running"]:
@@ -173,6 +175,13 @@ def main(source="0"):
                 text, color = result_banner(label, hit, candidates, colors)
                 with lock:
                     state["result"] = (text, color, time.time())
+                # log confirmed matches (skip AMBIGUOUS / NOT FOUND noise)
+                if label and label != "AMBIGUOUS":
+                    k = hit or norm(candidates[0])
+                    nowt = time.time()
+                    if nowt - last_log.get(k, 0) > LOG_COOLDOWN:
+                        last_log[k] = nowt
+                        ss.append_scan(k, label, source)
             else:
                 time.sleep(0.01)
 
